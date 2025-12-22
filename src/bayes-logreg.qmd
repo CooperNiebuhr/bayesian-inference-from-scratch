@@ -1,0 +1,248 @@
+---
+title: "Bayesian Logistic Regression from Scratch (MAP + Laplace)"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Bayesian Logistic Regression from First Princples
+
+## Reader guide
+
+This notebook demonstrates a **from-scratch implementation of Bayesian logistic regression**
+using NumPy, with uncertainty estimated via a Laplace approximation.
+
+**If you have limited time:**
+- Jump to **Results and comparison** to see how the implementation matches scikit-learn.
+- Skim **From-scratch building blocks** to understand what was implemented manually.
+
+**What this notebook covers:**
+- MAP estimation via Newton’s method
+- Laplace approximation of the posterior
+- Posterior predictive inference via Monte Carlo
+- Sanity-check comparison against a standard library implementation
+
+Planned future notebooks will include:
+- Full posterior sampling via Markov Chain Monte Carlo with emphasis on reproducibility and evaluation
+- Hierarchical Bayesian models
+
+## Setup and data
+
+I begin by setting up the environment and generating a small synthetic binary
+classification dataset. This dataset is used consistently throughout the notebook
+as a controlled setting where model behavior is easy to visualize and verify.
+
+All randomness is seeded to ensure the results are fully reproducible.
+
+```{python}
+import numpy as np
+#| eval: false
+
+rng = np.random.default_rng(0)
+n0 = n1 = 100
+X0 = rng.normal(size=(n0,2)) + np.array([-2.0,0.0])
+X1 = rng.normal(size=(n1,2)) + np.array([2.0,0.0])
+X = np.vstack([X0,X1])
+X = np.c_[np.ones(len(X)),X]
+y = np.r_[np.zeros(n0), np.ones(n1)];
+```
+
+## MAP estimation via Newton’s method
+
+The first step in inference is computing the **maximum a posteriori (MAP)**
+estimate of the logistic regression weights.
+
+This corresponds to maximizing the log posterior, which combines the logistic log likelihood and a Gaussian prior over the weights.
+
+For logistic regression with a Gaussian prior, the log posterior is concave.
+This makes Newton’s method a natural choice: it uses exact curvature information
+to converge rapidly to a unique optimum.
+
+The output of this step is a single weight vector `w_hat`, which serves as the
+center of the posterior approximation in later steps.
+
+`newton_map_logistic` also outputs the log-posterior Hessian at that solution `H_hat`, and an `info` dictionary with convergence status and a log-posterior history for diagnostics.
+
+```{python}
+from bayes_fp import newton_map_logistic
+#| eval: false
+
+w_hat, H_hat, info = newton_map_logistic(X, y, sigma0 = 0.5, verbose = True)
+```
+
+## Posterior uncertainty via the Laplace approximation
+
+A point estimate alone does not capture uncertainty. To approximate the full
+posterior distribution, I use a **Laplace approximation** centered at the MAP.
+
+The idea is to approximate the log posterior locally with a quadratic expansion.
+This results in a multivariate Gaussian approximation whose covariance is given
+by the inverse of the negative Hessian evaluated at the MAP estimate.
+
+This step reuses curvature information from the optimization procedure and
+provides an efficient approximation to posterior uncertainty.
+
+```{python}
+from bayes_fp import laplace_covariance
+#| eval: false
+
+Sigma = laplace_covariance(H_hat)
+```
+
+## Posterior predictive inference
+
+To make predictions that account for parameter uncertainty, I compute the
+**posterior predictive distribution** rather than relying on a single set of
+weights.
+
+This is done by:
+1. Sampling weight vectors from the Laplace-approximated posterior.
+2. Evaluating the logistic model for each sampled weight.
+3. Averaging the resulting probabilities.
+
+This Monte Carlo integration produces smoother and more calibrated predictions
+than a point-estimate classifier.
+
+```{python}
+#| eval: false
+#| output: false
+
+from bayes_fp import predictive_laplace_mc
+
+probabilities = predictive_laplace_mc(Xnew, w_hat, Sigma, nsamples = 5000, seed = 1)
+```
+
+## Putting it all together
+
+At this point, the pieces of the Bayesian pipeline have been demonstrated:
+- MAP estimation provides a central parameter estimate,
+- the Laplace approximation quantifies local uncertainty,
+- and Monte Carlo integration yields posterior predictive probabilities.
+
+Putting it together, the full simulation is run below as well as a nice visualization.
+
+```{python}
+import numpy as np
+
+from bayes_fp import newton_map_logistic, laplace_covariance, predictive_laplace_mc, sigmoid
+
+rng = np.random.default_rng(0)
+n0 = n1 = 100
+X0 = rng.normal(size=(n0,2)) + np.array([-2.0,0.0])
+X1 = rng.normal(size=(n1,2)) + np.array([2.0,0.0])
+X = np.vstack([X0,X1])
+X = np.c_[np.ones(len(X)),X]
+y = np.r_[np.zeros(n0), np.ones(n1)]
+
+
+w_hat, H_hat, info = newton_map_logistic(X, y, sigma0 = 0.5, verbose = True)
+Sigma = laplace_covariance(H_hat)
+
+Xnew = np.c_[np.ones(3), np.array([[-3, 0], [0, 0], [3, 0]])]
+probabilities = predictive_laplace_mc(Xnew, w_hat, Sigma, nsamples = 5000, seed = 1)
+print("Predicted probabilities at new locations:", probabilities)
+print("MAP estimate:", w_hat)
+```
+
+```{python}
+#| echo: false
+
+import numpy as np
+import matplotlib.pyplot as plt
+from bayes_fp import newton_map_logistic, laplace_covariance, predictive_laplace_mc
+
+# --- Fit MAP & Laplace ---
+w_hat, H_hat, info = newton_map_logistic(X, y, sigma0=0.5, verbose=False)
+Sigma = laplace_covariance(H_hat)
+
+x1_min, x1_max = X[:,1].min()-1.0, X[:,1].max()+1.0
+x2_min, x2_max = X[:,2].min()-1.0, X[:,2].max()+1.0
+nx, ny = 200, 200
+gx = np.linspace(x1_min, x1_max, nx)
+gy = np.linspace(x2_min, x2_max, ny)
+G1, G2 = np.meshgrid(gx, gy)
+G = np.c_[np.ones(G1.size), G1.ravel(), G2.ravel()]
+
+def predictive_grid(Xgrid, batch=20000, nsamples=5000, seed=42):
+    probs = np.empty(Xgrid.shape[0], dtype=float)
+    start = 0
+    while start < Xgrid.shape[0]:
+        end = min(start + batch, Xgrid.shape[0])
+        probs[start:end] = predictive_laplace_mc(Xgrid[start:end], w_hat, Sigma, nsamples=nsamples, seed=seed+start)
+        start = end
+    return probs
+
+grid_probs = predictive_grid(G, batch=20000, nsamples=3000, seed=123)
+Z = grid_probs.reshape(G1.shape)
+
+# --- Plot: probability heatmap ---
+fig, ax = plt.subplots(figsize=(6, 5))
+
+im = ax.imshow(
+    Z,
+    extent=[x1_min, x1_max, x2_min, x2_max],
+    origin="lower",
+    aspect="auto",
+    alpha=0.6,
+)
+
+cs = ax.contour(gx, gy, Z, levels=[0.5], linewidths=2)
+
+# Training points
+ax.scatter(X0[:,0], X0[:,1], s=12, label="class 0")
+ax.scatter(X1[:,0], X1[:,1], s=12, label="class 1")
+
+ax.set_xlabel("x1")
+ax.set_ylabel("x2")
+ax.set_title("Bayesian Logistic Regression (Laplace + MC predictive)")
+ax.legend(loc="upper right")
+
+plt.show()
+
+print("Converged:", info.get("converged", None), "iters:", info.get("num_iter", None))
+print("MAP:", np.array2string(w_hat, precision=4))
+```
+
+Comparison between sklearn and my implementation
+
+```{python}
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss
+
+# Fit sklearn logistic regression (MLE)
+clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=1000)
+clf.fit(X, y)
+
+# Predictions from sklearn
+p_sklearn = clf.predict_proba(X)[:, 1]
+
+# Predictions from MAP estimate
+p_map = sigmoid(X @ w_hat)
+
+
+print("Log-loss (MAP):     ", log_loss(y, p_map))
+print("Log-loss (sklearn):", log_loss(y, p_sklearn))
+```
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+lp = info["logpost_hist"]
+iters = np.arange(1, len(lp) + 1)
+
+plt.figure(figsize=(6,4))
+plt.plot(iters, lp, marker="o", linewidth=1.8)
+plt.xlabel("Iteration")
+plt.ylabel("Log posterior")
+plt.title("Newton ascent: log-posterior by iteration")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
