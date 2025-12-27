@@ -3,10 +3,12 @@ title: "Bayesian Logistic Regression from First Principles"
 format:
   html:
     toc: true
+    self-contained: true
 execute:
   echo: true
   warning: false
   message: false
+  cache: true
 ---
 
 ## Overview
